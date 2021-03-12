@@ -1,12 +1,11 @@
 use std::io;
 use std::error::Error;
-use std::io::{Write, ErrorKind};
+use std::io::{BufRead, Write, ErrorKind};
 
 use select::document::Document;
 use select::node::Node;
 use select::predicate::{Attr, Class, Name, Text};
 
-use termion::input::TermRead;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -88,36 +87,25 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
 fn get_login_credentials() -> Result<(String, String), io::Error> {
 	loop {
-		let stdin = io::stdin();
-		let mut stdin = stdin.lock();
-		let stdout = io::stdout();
-		let mut stdout = stdout.lock();
-
 		print!("username: ");
-		stdout.flush().unwrap();
+		io::stdout().flush().unwrap();
 
-		let username = match stdin.read_line().expect("error reading username") {
-			Some(s) if s == "" => {
-				return Err(io::Error::new(ErrorKind::InvalidInput, "no username provided"));
-			},
-			Some(s) => s,
-			None => {
-				return Err(io::Error::new(ErrorKind::InvalidInput, "no username provided"));
-			},
-		};
-
-		print!("password: ");
-		stdout.flush().unwrap();
-
-		let password = match stdin.read_passwd(&mut stdout).expect("error reading passworld") {
-			Some(s) if s == "" => {
+		let mut username = String::new();
+		io::stdin().read_line(&mut username)?;
+		if username == "" {
+			print!("\n");
+			return Err(io::Error::new(ErrorKind::InvalidInput, "no username provided!"));
+		}
+		
+		let password = match rpassword::read_password_from_tty(Some("password: ")) {
+			Ok(s) if s == "" => {
 				print!("\n");
 				return Err(io::Error::new(ErrorKind::InvalidInput, "no password provided"));
 			},
-			Some(s) => s,
-			None => {
+			Ok(s) => s,
+			Err(e) => {
 				print!("\n");
-				return Err(io::Error::new(ErrorKind::InvalidInput, "no password provided"));
+				return Err(e);
 			},
 		};
 
