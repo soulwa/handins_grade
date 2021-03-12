@@ -62,7 +62,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 		.map(|vals: Vec<&str>| vals.iter().map(|val| val.parse::<f64>().unwrap()).collect())
 		.collect();
 
-	let _ungraded = grades.iter().filter(|vals| vals.len() == 1);
+	let ungraded = grades.iter().filter(|vals| vals.len() == 1).map(|weight| weight[0]).collect();
 
 	let graded: Vec<Vec<f64>> = grades.into_iter().filter(|vals| vals.len() > 1).collect();
 
@@ -73,6 +73,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
 	let assignment_names = &assignment_names[assignment_names.len() - grades.len()..];
 
+	let (cur_grade, min_grade, max_grade, max_points) = calculate_grade(&grades, &weights, &ungraded);
+
 	println!("{:<width$} {:<8} {:>8}", "Homework", "Grades", "Weight", width = width + 5);
 	for (name, (grade, weight)) in assignment_names.iter().zip(grades.iter().zip(weights.iter())) {
 		let mut fmt_name = String::from(*name);
@@ -80,7 +82,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
 		println!("{:<width$} {:<8.2} {:>8.2}", fmt_name, grade, weight, width = width + 5);
 	}
-	println!("{:<width$} {:<.2}", "Your current grade:", calculate_grade(grades, weights), width = width + 5);
+	println!("{:<width$} {:<.2}", "Your current grade:", cur_grade, width = width + 5);
+	println!("{:<width$} {:<.2}", "Your minimum grade:", min_grade, width = width + 5);
+	println!("{:<width$} {:<.2}", "Your maximum grade:", max_grade, width = width + 5);
+	println!("{:<width$} {:<.2}", "Ungraded points you can earn:", max_points, width = width + 5);
 
 	Ok(())
 }
@@ -111,7 +116,7 @@ fn get_login_credentials() -> Result<(String, String), io::Error> {
 	Ok((username, password))
 }
 
-fn calculate_grade(grades: Vec<f64>, weights: Vec<f64>) -> f64 {
+fn calculate_grade(grades: &Vec<f64>, weights: &Vec<f64>, ungraded_weights: &Vec<f64>) -> (f64, f64, f64, f64) {
 	assert!(grades.len() == weights.len());
 
 	let total_weight: f64 = weights.iter().sum();
@@ -119,5 +124,17 @@ fn calculate_grade(grades: Vec<f64>, weights: Vec<f64>) -> f64 {
 	let scaled_grade = grades.iter().zip(weights.iter())
 		.fold(0.0, |sum, grade_pair| grade_pair.0 * grade_pair.1 + sum);
 
-	scaled_grade / total_weight
+	println!("{:?}", total_weight);
+
+	let future_weights: f64 = ungraded_weights.iter().sum();
+	let optimistic_grade = scaled_grade + 100.0 * (100.0 - total_weight);
+
+	(
+		scaled_grade / total_weight, // your current grade
+		scaled_grade / 100.0, 		 // your minimum grade
+		optimistic_grade / 100.0, 	 // maximum possible grade for the course
+		// most points you can earn from ungraded assignments
+		// delta (max possible grade from ungraded assignments, current grade)
+		(scaled_grade + 100.0 * future_weights) / (total_weight + future_weights) - (scaled_grade / total_weight),
+	)
 }
