@@ -1,6 +1,6 @@
 use std::io;
 use std::error::Error;
-use std::io::{BufRead, Write, ErrorKind};
+use std::io::{Write, ErrorKind};
 
 use select::document::Document;
 use select::node::Node;
@@ -76,7 +76,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 	println!("{:<width$} {:<8} {:>8}", "Homework", "Grades", "Weight", width = width + 5);
 	for (name, (grade, weight)) in assignment_names.iter().zip(grades.iter().zip(weights.iter())) {
 		let mut fmt_name = String::from(*name);
-		fmt_name.push_str(":");
+		fmt_name.push(':');
 
 		println!("{:<width$} {:<8.2} {:>8.2}", fmt_name, grade, weight, width = width + 5);
 	}
@@ -86,33 +86,29 @@ async fn main() -> Result<(), Box<dyn Error>> {
 }
 
 fn get_login_credentials() -> Result<(String, String), io::Error> {
-	loop {
-		print!("username: ");
-		io::stdout().flush().unwrap();
+	print!("username: ");
+	io::stdout().flush().unwrap();
 
-		let mut username = String::new();
-		io::stdin().read_line(&mut username)?;
-		if username == "" {
-			print!("\n");
-			return Err(io::Error::new(ErrorKind::InvalidInput, "no username provided!"));
-		}
-		
-		let password = match rpassword::read_password_from_tty(Some("password: ")) {
-			Ok(s) if s == "" => {
-				print!("\n");
-				return Err(io::Error::new(ErrorKind::InvalidInput, "no password provided"));
-			},
-			Ok(s) => s,
-			Err(e) => {
-				print!("\n");
-				return Err(e);
-			},
-		};
-
-		print!("\n");
-
-		break Ok((username, password));
+	let mut username = String::new();
+	io::stdin().read_line(&mut username)?;
+	if username.is_empty() {
+		println!();
+		return Err(io::Error::new(ErrorKind::InvalidInput, "no username provided!"));
 	}
+
+	let password = match rpassword::read_password_from_tty(Some("password: ")) {
+		Ok(s) if s.is_empty() => {
+			println!();
+			return Err(io::Error::new(ErrorKind::InvalidInput, "no password provided"));
+		},
+		Ok(s) => s,
+		Err(e) => {
+			println!();
+			return Err(e);
+		},
+	};
+
+	Ok((username, password))
 }
 
 fn calculate_grade(grades: Vec<f64>, weights: Vec<f64>) -> f64 {
@@ -123,5 +119,5 @@ fn calculate_grade(grades: Vec<f64>, weights: Vec<f64>) -> f64 {
 	let scaled_grade = grades.iter().zip(weights.iter())
 		.fold(0.0, |sum, grade_pair| grade_pair.0 * grade_pair.1 + sum);
 
-	return scaled_grade / total_weight;
+	scaled_grade / total_weight
 }
