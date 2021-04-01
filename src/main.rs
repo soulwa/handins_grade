@@ -8,7 +8,6 @@ use clap::{App, Arg, ArgMatches, SubCommand};
 use chrono::{DateTime, FixedOffset, Local};
 
 use select::document::Document;
-use select::node::Node;
 use select::predicate::{Attr, Class, Name, Text};
 
 // represents an assignment with additional metadata from scraping: the
@@ -41,7 +40,7 @@ impl Assignment {
 
     pub fn late(&self) -> bool {
         let now = Local::now();
-        now > self.due_date
+        now >= self.due_date
     }
 
     pub fn graded(&self) -> bool {
@@ -384,9 +383,9 @@ async fn assignments(
                 .filter(|grade| grade.is(Text))
                 .map(|grade| grade.text());
 
-            // println!("{}: {}, {}, {}, {:?}", name, link, date, weight, grade);
             let weight = weight.parse::<f64>().unwrap();
-            let grade = grade.map(|grade| grade.parse::<f64>().unwrap());
+            let grade = grade.map(|grade| grade.parse::<f64>().ok()).flatten();
+
 
             Assignment::new(name, link, grade, weight, date)
         })
@@ -445,10 +444,7 @@ fn lookup_course(course: &str) -> Result<u32, &str> {
 fn calculate_grade(assignments: &[Assignment]) -> (f64, f64, f64, f64) {
     let valid_weights: Vec<f64> = assignments
         .iter()
-        .filter_map(|a| match a.grade {
-            Some(_) => Some(a.weight),
-            None => None,
-        })
+        .filter_map(|a| a.grade.map(|_| a.weight))
         .collect();
 
     let future_weights: Vec<f64> = assignments
