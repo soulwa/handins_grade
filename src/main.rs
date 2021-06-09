@@ -1,58 +1,33 @@
 use std::error::Error;
-use std::fs;
 use std::io;
 use std::io::{ErrorKind, Write};
+use std::sync::Arc;
+
 
 use clap::{App, Arg, ArgMatches, SubCommand};
 
-use chrono::{DateTime, FixedOffset, Local};
+use chrono::DateTime;
+
+use reqwest::{Client, Url};
+use reqwest::cookie::{CookieStore, Jar};
+use reqwest::multipart::{Form, Part};
 
 use select::document::Document;
 use select::predicate::{Attr, Class, Name, Text};
 
-// represents an assignment with additional metadata from scraping: the
-// name, relative link, if the assignment was graded, and its due date
-#[derive(Debug)]
-struct Assignment {
-    name: String,
-    link: String,
-    grade: Option<f64>,
-    weight: f64,
-    due_date: DateTime<FixedOffset>,
-}
+use simsearch::SimSearch;
 
-impl Assignment {
-    pub fn new(
-        name: String,
-        link: String,
-        grade: Option<f64>,
-        weight: f64,
-        due_date: DateTime<FixedOffset>,
-    ) -> Assignment {
-        Assignment {
-            name,
-            link,
-            grade,
-            weight,
-            due_date,
-        }
-    }
+use tokio::io::AsyncReadExt;
 
-    pub fn late(&self) -> bool {
-        let now = Local::now();
-        now >= self.due_date
-    }
+mod assignment;
 
-    pub fn graded(&self) -> bool {
-        self.grade.is_some()
-    }
-}
+use crate::assignment::Assignment;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let matches = App::new("handins")
 		.version("0.1")
-		.author("Sam Lyon <sam.c.lyon@gmail.com")
+		.author("Sam Lyon <sam.c.lyon@gmail.com>")
 		.about("Command line interface for handins.ccs.neu.edu")
 		.subcommand(SubCommand::with_name("grade")
 			.about("fetches your grades for a given course")
@@ -120,10 +95,10 @@ cs2510a  	--		Fundamentals of Computer Science 2 Accelerated\n"
 				.help("number of hours you worked on the homework submitted")
 				.required(true)
 				.takes_value(true))
-			.arg(Arg::with_name("comments")
-				.short("C")
-				.long("comments")
-				.help("any additional comments you want to leave for handins")
+			.arg(Arg::with_name("notes")
+				.short("n")
+				.long("notes")
+				.help("any additional student notes you want to leave for handins")
 				.takes_value(true))
 			.arg(Arg::with_name("wait")
 				.short("w")
@@ -135,25 +110,29 @@ cs2510a  	--		Fundamentals of Computer Science 2 Accelerated\n"
 				.help("choose the most recently assigned homework to submit to")))
 	.get_matches();
 
+    // using to debug cookie values, if necessary 
+    let client = handins_login::<Jar>(None).await?;
+
     match matches.subcommand() {
-        ("grade", Some(sub_matches)) => fetch_grades(&handins_login().await?, &sub_matches).await,
-        ("submit", Some(sub_matches)) => submit_file(&handins_login().await?, &sub_matches).await,
-        ("ungraded", Some(sub_matches)) => {
-            fetch_ungraded(&handins_login().await?, &sub_matches).await
-        }
+        ("grade", Some(sub_matches)) => fetch_grades(&client, sub_matches).await,
+        ("submit", Some(sub_matches)) => submit_file(&client, sub_matches).await,
+        ("ungraded", Some(sub_matches)) => fetch_ungraded(&client, sub_matches).await,
         _ => Err("must use a supported subcommand with the handins app!")?,
     }
 }
 
 async fn fetch_grades(
-    client: &reqwest::Client,
+    client: &Client,
     matches: &ArgMatches<'_>,
 ) -> Result<(), Box<dyn Error>> {
     let course: &str = matches
         .value_of("COURSE")
         .ok_or("you must input a course! supported courses: cs2510, cs2510a")?;
 
-    let assignments = assignments(client, course).await?;
+    let course_id = lookup_course(course)
+        .map_err(|_| "not a supported course for handins at this time")?;
+
+    let assignments = assignments(client, course_id).await?;
 
     let width = assignments.iter().map(|s| s.name.len()).max().unwrap();
 
@@ -209,14 +188,17 @@ async fn fetch_grades(
 }
 
 async fn fetch_ungraded(
-    client: &reqwest::Client,
+    client: &Client,
     matches: &ArgMatches<'_>,
 ) -> Result<(), Box<dyn Error>> {
     let course: &str = matches
         .value_of("COURSE")
         .ok_or("you must input a course! supported courses: cs2510, cs2510a")?;
 
-    let assignments: Vec<Assignment> = assignments(&client, course).await?;
+    let course_id = lookup_course(course)
+        .map_err(|_| "not a supported course for handins at this time")?;
+
+    let assignments: Vec<Assignment> = assignments(&client, course_id).await?;
     let ungraded_assignments: Vec<&Assignment> =
         assignments.iter().filter(|a| a.grade.is_none()).collect();
     let width = ungraded_assignments
@@ -244,21 +226,27 @@ async fn fetch_ungraded(
     Ok(())
 }
 
-async fn submit_file(
-    client: &reqwest::Client,
+async fn submit_file<'b>(
+    client: &Client,
     matches: &ArgMatches<'_>,
 ) -> Result<(), Box<dyn Error>> {
-    let file = matches
+    let file_name: String = matches
         .value_of("FILE")
         .or(matches.value_of("infile"))
-        .ok_or("you must input a homework file to submit!")?;
+        .ok_or("you must input a homework file to submit!")?
+        .to_owned();
 
-    let file = fs::canonicalize(file).map_err(|_| "you must input a valid file name!")?;
+    let mut file = tokio::fs::File::open(&file_name).await?;
+    let mut buffer = vec![];
+    file.read_to_end(&mut buffer).await?;
 
     let course = matches
         .value_of("COURSE")
         .or(matches.value_of("course"))
         .ok_or("you must input a course! use --help to see supported courses")?;
+
+    let course_id = lookup_course(course)
+        .map_err(|_| "not a supported course for handins at this time")?;
 
     let assignment = remove_whitespace(
         matches
@@ -267,25 +255,170 @@ async fn submit_file(
             .ok_or("you must input an assignment to submit your file to!")?,
     );
 
-    let assignments = assignments(&client, course);
+    let hours = matches.value_of("hours")
+        .ok_or("you must input a number of hours you worked on this assignment!")?
+        .parse::<f64>()?;
+    let notes = matches.value_of("notes")
+        .unwrap_or("").to_owned();
 
-    unimplemented!();
+    if hours < 0.0 {
+        return Err("cannot work on an assignment for negative hours!")?;
+    }
+
+    let mut assignments: Vec<Assignment> = assignments(&client, course_id)
+        .await?
+        .into_iter()
+        .filter(|assignment| !assignment.graded())
+        .collect();
+
+    // this block of code revolves around getting the correct assignment to submit
+
+    if assignments.is_empty() {
+        return Err("all assignments have been graded!")?;
+    }
+    // sort by reverse date order (most recent first)
+    assignments.sort_by(|a1, a2| a2.due_date.cmp(&a1.due_date));
+
+    let submission_candidate_indices = if matches.is_present("recent") {
+        vec![0]
+    } else {
+        let mut engine: SimSearch<usize> = SimSearch::new();
+        for (i, item) in assignments.iter().enumerate() {
+            engine.insert(i, &item.name);
+        }
+        engine.search(&assignment)
+    };
+
     // at this point, we need to decide how to parse the assignment submitted by the user.
     // they can either submit an exact (no whitespace) match, or an inexact match. maybe try
     // to implement "A-P" form (A assignment number, P problem number) or "A" form, but this really depends
     // on the class...
+    let to_submit = {
+        if submission_candidate_indices.is_empty() {
+            Err("assignment name didn't match any assignments!")
+        } else if matches.is_present("recent") {
+            Ok(&assignments[0])
+        } else {
+            let mut to_submit = Err("couldn't find the right assignment, shutting down");
+            for idx in submission_candidate_indices {
+                match validate_assignment(&assignments[idx]) {
+                    Ok(Some(_)) => {
+                        to_submit = Ok(&assignments[idx]);
+                        break;
+                    }
+                    Ok(None) => continue,
+                    Err(_) => return Err("error reading from stdin")?,
+                }
+            }
+            to_submit
+        }
+    }?;
 
     // we also must check if the assignment would be late, and warn the user if they're trying to submit a late assignment.
-    // if the assignment is already graded, we shouldn't let them submit. no way to know late days, but this would also
-    // cause an error
+    // it's impossible to try to submit to a graded assignment.
+    if to_submit.late() {
+        print!(
+            "{}",
+            format!(
+                "this assignment is {} hours late! submit anyways? [y/N] ",
+                to_submit.how_late()
+            )
+        );
+        io::stdout().flush().unwrap();
+
+        // determine if the user still wants to submit
+        loop {
+            let mut ans = String::new();
+            io::stdin().read_line(&mut ans)?;
+
+            match ans.trim().to_lowercase().as_str() {
+                "y" | "yes" => break,
+                "n" | "" | "no" => return Err("not submitting assignment, shutting down")?,
+                _ => {
+                    println!("couldn't get response, trying again...");
+                    continue;
+                }
+            }
+        }
+    }
+    println!("{:?}", to_submit);
+    println!("{:?}", to_submit.submission_link(course_id));
+
+    // now, finally, we can construct the request and submit the assignment.
+    let submission_page = client
+        .get(to_submit.submission_link(course_id))
+        .header("Referer", "https://handins.ccs.neu.edu")
+        .send()
+        .await?
+        .text()
+        .await?;
+
+    // need to ensure, here, that we land on the correct page: search for distinct element?
+    let tree = Document::from(submission_page.as_str());
+
+    let token = tree
+        .find(Attr("name", "csrf-token"))
+        .next()
+        .unwrap()
+        .attr("content")
+        .unwrap();
+
+    let user_id = tree
+        .find(Attr("name", "submission[user_id]"))
+        .next()
+        .unwrap()
+        .attr("value")
+        .unwrap();
+
+    println!("{:?}", String::from_utf8(buffer.clone()));
+
+    let file = Part::bytes(buffer)
+        .file_name(file_name.clone())
+        .mime_str("application/octet-stream")?;
+
+    let submission = Form::new()
+        .text("utf8", "✓")
+        .text("authenticity_token", token.to_owned())
+        .text("submission[type]", "FilesSub")
+        .text("submission[assignment_id]", to_submit.id.to_string())
+        .text("submission[user_id]", user_id.to_owned())
+        .text("submission[time_taken]", format!("{:.1}", hours))
+        .text("submission[student_notes]", notes)
+        .part("submission[upload_file]", file)
+        .text("commit", "Submit files");
+
+    println!("{:?}", submission);
+
+    // DANGER: DO NOT ATTEMPT UNTIL UNGRADED HW AVAILABLE
+    // let results_page = client
+    //     .post(to_submit.submission_link(course_id))
+    //     .multipart(submission)
+    //     .header("Referer", to_submit.submission_link(course_id))
+    //     .send()
+    //     .await?;
+
+    // println!("{:?}", results_page.headers());
+
+    Ok(())
 }
 
-async fn handins_login() -> Result<reqwest::Client, Box<dyn Error>> {
+async fn handins_login<C: CookieStore + 'static>(store: Option<Arc<C>>) -> Result<Client, Box<dyn Error>> {
     // initialize a new client and login to the user's homepage, so we can do more from there
-    let client = reqwest::Client::builder()
-        .cookie_store(true)
-        .build()
-        .expect("couldn't create client to connect to internet");
+    let client = {
+        if let Some(store) = store {
+            Client::builder()
+                .cookie_provider(store)
+                .build()
+                .expect("couldn't create client to connect to internet")
+        }
+        else {
+            Client::builder()
+                .cookie_store(true)
+                .build()
+                .expect("couldn't create client to connect to internet")
+        }
+    };
+     
 
     let (username, password) = get_login_credentials()?;
 
@@ -326,13 +459,13 @@ async fn handins_login() -> Result<reqwest::Client, Box<dyn Error>> {
 }
 
 async fn assignments(
-    client: &reqwest::Client,
-    course: &str,
+    client: &Client,
+    course: i64,
 ) -> Result<Vec<Assignment>, Box<dyn Error>> {
     let assignments = client
         .get(format!(
             "https://handins.ccs.neu.edu/courses/{}/assignments/",
-            lookup_course(course)?
+            course
         ))
         .header("Referer", "https://handins.ccs.neu.edu/")
         .send()
@@ -355,7 +488,11 @@ async fn assignments(
                 .unwrap()
                 .attr("href")
                 .unwrap()
-                .to_owned();
+                .rsplit('/')
+                .next()
+                .unwrap()
+                .parse::<i64>()
+                .unwrap();
             let name = row_selection.find(Text).first().unwrap().text();
             let date = DateTime::parse_from_rfc3339(
                 &row_selection
@@ -385,7 +522,6 @@ async fn assignments(
 
             let weight = weight.parse::<f64>().unwrap();
             let grade = grade.map(|grade| grade.parse::<f64>().ok()).flatten();
-
 
             Assignment::new(name, link, grade, weight, date)
         })
@@ -426,15 +562,37 @@ fn get_login_credentials() -> Result<(String, String), io::Error> {
     Ok((username, password))
 }
 
+fn validate_assignment(assignment: &Assignment) -> Result<Option<&Assignment>, Box<dyn Error>> {
+    loop {
+        print!(
+            "Did you want to submit to the following assignment: {}? [Y/n] ",
+            assignment.name
+        );
+        io::stdout().flush().unwrap();
+
+        let mut ans = String::new();
+        io::stdin().read_line(&mut ans)?;
+        let ans = ans.trim();
+        if ans.is_empty() || ans.to_lowercase() == "y" {
+            return Ok(Some(assignment));
+        } else if ans.to_lowercase() == "n" {
+            return Ok(None);
+        } else {
+            println!("Couldn't get response, trying again...");
+        }
+    }
+}
+
 // spring 2021 courses
 // will probably add a macro to convert a file w course names, number
 // to a lookup table, if numbers get updated each year
-fn lookup_course(course: &str) -> Result<u32, &str> {
+fn lookup_course(course: &str) -> Result<i64, &str> {
     match course.to_lowercase().as_str() {
         "cs2500" | "fundies1" | "f1" => Ok(131),
         "cs2510" | "fundies2" | "f2" => Ok(129),
         "cs2510a" | "fundies2accel" | "f2accel" | "f2a" => Ok(126),
-        "cs3500" | "ood" => Ok(133),
+        "cs3500" | "ood" => Ok(138),
+        "cs3500sp21" | "oodsp21" => Ok(133),
         "cs4410" | "compilers" => Ok(127),
         "cs4500" | "swdev" | "swe" => Ok(130),
         _ => Err("Course not found"),

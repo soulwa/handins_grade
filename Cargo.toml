@@ -1,5 +1,5 @@
 [package]
-name = "handins_grade"
+name = "handins"
 version = "0.1.0"
 authors = ["Sam Lyon <sam.c.lyon@gmail.com>"]
 edition = "2018"
@@ -8,7 +8,7 @@ edition = "2018"
 
 [dependencies]
 clap = "~2.33.0"
-reqwest = { version = "0.11.2", features = ["cookies"] }
+reqwest = { version = "0.11.2", features = ["blocking", "cookies", "multipart"] }
 rpassword = "5.0.1"
 tokio = { version = "1.3.0", features = ["full"] }
 select = "0.5.0"
